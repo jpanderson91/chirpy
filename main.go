@@ -9,9 +9,11 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
-	"github.com/jpanderson91/chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/jpanderson91/chirpy/internal/database"
 	_ "github.com/lib/pq"
 )
 
@@ -22,6 +24,13 @@ type apiConfig struct {
 
 type parameters struct {
     Body string `json:"body"`
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -80,7 +89,7 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
     err := decoder.Decode(&params)
     if err != nil {
         log.Print("Error decoding request body: ", err)
-        w.WriteHeader(http.StatusInternalServerError)
+        w.WriteHeader(http.StatusBadRequest)
         return
     }
     // reject chirps that exceed the 140 character limit
@@ -109,6 +118,38 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
     w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+    var params struct {
+        Email string `json:"email"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+        log.Print("Error decoding request body: ", err)
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
+    dbUser, err := cfg.db.CreateUser(r.Context(), params.Email)
+    if err != nil {
+        log.Print("Error creating user: ", err)
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+    response := User{
+        ID:        dbUser.ID,
+        CreatedAt: dbUser.CreatedAt,
+        UpdatedAt: dbUser.UpdatedAt,
+        Email:     dbUser.Email,
+    }
+    dat, err := json.Marshal(response)
+    if err != nil {
+        log.Print("Error encoding response body: ", err)
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    w.Write(dat)
+}
+
 
 
 func main() {
@@ -130,6 +171,8 @@ func main() {
     mux.HandleFunc("GET /admin/metrics", apiCfg.numRequests)
     mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
     mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+    mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
+    mux.HandleFunc("POST /api/chirps", )
 
     // Create a new http.Server struct
     server := &http.Server{
