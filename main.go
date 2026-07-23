@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/jpanderson91/chirpy/internal/auth"
 	"github.com/jpanderson91/chirpy/internal/database"
 	_ "github.com/lib/pq"
 )
@@ -129,6 +130,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
     var params struct {
+		Password string `json:"password"`
         Email string `json:"email"`
     }
     if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
@@ -136,7 +138,13 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
         w.WriteHeader(http.StatusBadRequest)
         return
     }
-    dbUser, err := cfg.db.CreateUser(r.Context(), params.Email)
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Print("Error hashing password: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+    dbUser, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{Email: params.Email, HashedPassword: hashedPassword})
     if err != nil {
         log.Print("Error creating user: ", err)
         w.WriteHeader(http.StatusInternalServerError)
@@ -157,6 +165,23 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusCreated)
     w.Write(dat)
+}
+
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	dbChirp, err := cfg.db.GetChirp(r.Context(), id)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	dat, _ := json.Marshal(Chirp{ID: dbChirp.ID, CreatedAt: dbChirp.CreatedAt, UpdatedAt: dbChirp.UpdatedAt, Body: dbChirp.Body, UserID: dbChirp.UserID})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
 }
 
 func (cfg *apiConfig) handlerReturnChirp(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +206,48 @@ func (cfg *apiConfig) handlerReturnChirp(w http.ResponseWriter, r *http.Request)
 	w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+    var params struct {
+        Password string `json:"password"`
+        Email    string `json:"email"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+        log.Print("Error decoding request body: ", err)
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
+	dbUser, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		dat, _ := json.Marshal(map[string]string{"error": "incorrect email or password"})
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(dat)
+		return
+	}
+	match, err := auth.CheckPasswordHash(params.Password, dbUser.HashedPassword)
+	if err != nil || !match {
+		w.Header().Set("Content-Type", "application/json")
+		dat, _ := json.Marshal(map[string]string{"error": "incorrect email or password"})
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(dat)
+		return
+	}
+	dat, err := json.Marshal(User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	})
+	if err != nil {
+		log.Print("Error encoding response body: ", err)
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    w.Write(dat)
+}
+
 
 func main() {
 	godotenv.Load()
@@ -203,6 +270,8 @@ func main() {
     mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 	mux.HandleFunc("GET /api/chirps", apiCfg.handlerReturnChirp)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
 
     // Create a new http.Server struct
     server := &http.Server{
