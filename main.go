@@ -159,6 +159,27 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
     w.Write(dat)
 }
 
+func (cfg *apiConfig) handlerReturnChirp(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.db.GetChirps(r.Context())
+	if err != nil {
+		log.Print("Error getting chirps: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	result := make([]Chirp, len(chirps))
+	for i, c := range chirps {
+		result[i] = Chirp{ID: c.ID, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, Body: c.Body, UserID: c.UserID}
+	}
+	dat, err := json.Marshal(result)
+	if err != nil {
+		log.Print("Error encoding response body: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(dat)
+}
 
 
 func main() {
@@ -181,6 +202,7 @@ func main() {
     mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
     mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerReturnChirp)
 
     // Create a new http.Server struct
     server := &http.Server{
