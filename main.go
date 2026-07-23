@@ -22,8 +22,12 @@ type apiConfig struct {
 	db             *database.Queries
 }
 
-type parameters struct {
-    Body string `json:"body"`
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 type User struct {
@@ -53,9 +57,14 @@ func (cfg *apiConfig) numRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
-	// reset the counter 
-    cfg.fileserverHits.Store(0)
-} 
+	cfg.fileserverHits.Store(0)
+	if err := cfg.db.DeleteAllUsers(r.Context()); err != nil {
+		log.Print("Error deleting users: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
 
 func handlerReadiness(w http.ResponseWriter, r *http.Request) {
     w.Header().Add("Content-Type", "text/plain; charset=utf-8")
@@ -64,58 +73,58 @@ func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 }
 
 func maskWords(input string, wordsToMask []string) string {
-	// 1. split the input into pieces somehow
-    words := strings.Split(input, " ")
-	// 2. loop over the pieces
-    for i, word := range words {
-        // 3. for each piece, check if it matches (case-insensitively) any word in wordsToMask
-        for _, wordToMask := range wordsToMask {
-            if strings.EqualFold(word, wordToMask) {
-                // 4. if it matches, replace it
-                words[i] = "****"
-            }
-        }
-    }	
-	// 5. join everything back together
-    input = strings.Join(words, " ")
-	// 6. return the result
-	return input
+	words := strings.Split(input, " ")
+	for i, word := range words {
+		for _, wordToMask := range wordsToMask {
+			if strings.EqualFold(word, wordToMask) {
+				words[i] = "****"
+			}
+		}
+	}
+	return strings.Join(words, " ")
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-    // decode the JSON request body into a parameters struct
-    decoder := json.NewDecoder(r.Body)
-    params := parameters{}
-    err := decoder.Decode(&params)
-    if err != nil {
-        log.Print("Error decoding request body: ", err)
-        w.WriteHeader(http.StatusBadRequest)
-        return
-    }
-    // reject chirps that exceed the 140 character limit
-    if len(params.Body) > 140 {
-        w.Header().Set("Content-Type", "application/json")
-        dat, err := json.Marshal(map[string]string{"error": "chirp is too long"})
-        if err != nil {
-            log.Print("Error encoding response body: ", err)
-            w.WriteHeader(http.StatusInternalServerError)
-            return
-        }
-        w.WriteHeader(http.StatusBadRequest)
-        w.Write(dat)
-        return
-    }  
-    // call maskWords function and pass in result as cleaned_body
-    cleaned_body := maskWords(params.Body, []string{"kerfuffle", "sharbert", "fornax"})
-    dat, err := json.Marshal(map[string]any{"cleaned_body": cleaned_body})
-    if err != nil {
-        log.Print("Error encoding response body: ", err)
-        w.WriteHeader(http.StatusInternalServerError)
-        return
-    }
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
-    w.Write(dat)
+func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
+	var params struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		log.Print("Error decoding request body: ", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if len(params.Body) > 140 {
+		w.Header().Set("Content-Type", "application/json")
+		dat, _ := json.Marshal(map[string]string{"error": "chirp is too long"})
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(dat)
+		return
+	}
+	dbChirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   maskWords(params.Body, []string{"kerfuffle", "sharbert", "fornax"}),
+		UserID: params.UserID,
+	})
+	if err != nil {
+		log.Print("Error creating chirp: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	dat, err := json.Marshal(Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	})
+	if err != nil {
+		log.Print("Error encoding response body: ", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write(dat)
 }
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -170,9 +179,8 @@ func main() {
     mux.HandleFunc("GET /api/healthz", handlerReadiness)
     mux.HandleFunc("GET /admin/metrics", apiCfg.numRequests)
     mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
-    mux.HandleFunc("POST /api/validate_chirp", validateChirp)
     mux.HandleFunc("POST /api/users", apiCfg.handlerCreateUser)
-    mux.HandleFunc("POST /api/chirps", )
+    mux.HandleFunc("POST /api/chirps", apiCfg.handlerCreateChirp)
 
     // Create a new http.Server struct
     server := &http.Server{
